@@ -1,0 +1,52 @@
+# SLO: Policy Violation Rate
+# Target: OPA authz denial rate < 0.01% of requests (expected: near-zero in steady state).
+# A sustained high denial rate indicates either an attack or a misconfigured policy.
+
+name: policy-violation-rate
+description: OPA authz denial rate must stay below 0.01% — sustained spikes indicate attack or misconfiguration
+owner_team: platform-security
+
+slo:
+  target_percent: 99.99   # 99.99% allow rate
+  window: 1h
+
+# OBO-specific SLO: OBO chain validation failures
+obo_slo:
+  name: obo-chain-failure-rate
+  description: OBO chain validation failures (expired tokens, depth exceeded, audience mismatch)
+  target_percent: 99.999  # < 0.001% failure rate
+  window: 1h
+  # A spike here indicates either a misconfigured service (not refreshing JWT SVIDs)
+  # or an active token theft attempt.
+
+prometheus_query:
+  # From OPA decision log metrics (emitted by opa-envoy plugin)
+  numerator: >
+    sum(rate(opa_decision_allow_total[5m]))
+  denominator: >
+    sum(rate(opa_decision_total[5m]))
+
+alerts:
+  - name: OpaAuthzDenialSpike
+    severity: warning
+    expr: >
+      (
+        sum(rate(opa_decision_allow_total[5m]))
+        /
+        sum(rate(opa_decision_total[5m]))
+      ) < 0.9999
+    for: 5m
+    annotations:
+      summary: "OPA authz denial rate above 0.01% for 5 minutes"
+      description: "Could indicate misconfigured policy, missing SPIFFE ID registration, or attack. Check OPA decision logs in Loki."
+
+  - name: OboChainFailureSpike
+    severity: critical
+    # OBO failures come from OPA decision log structured field `deny_reason`
+    # aggregated as a counter by the OTEL Collector's log-to-metric transform.
+    expr: >
+      sum(rate(opa_obo_denial_total[5m])) > 0.1
+    for: 2m
+    annotations:
+      summary: "OBO chain validation failures spiking"
+      description: "Possible causes: JWT SVID TTL too short (token expires in flight), max chain depth too low, or token theft attempt. Check obo.deny_reason in Loki."

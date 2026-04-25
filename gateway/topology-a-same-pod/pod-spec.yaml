@@ -1,0 +1,140 @@
+---
+# Topology A — Same-pod loopback isolation
+# The legacy app container binds ONLY to 127.0.0.1 (enforced via entrypoint args).
+# The ZT gateway container is the sole network-accessible entrypoint.
+# All zero-trust enforcement happens in the gateway before forwarding to loopback.
+#
+# Traffic flow: [mTLS caller] → zt-gateway:8443 → SVID verify → OPA OBO check → 127.0.0.1:8080 → [legacy app]
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legacy-reporting-svc
+  namespace: legacy
+  labels:
+    app: legacy-reporting-svc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: legacy-reporting-svc
+  template:
+    metadata:
+      labels:
+        app: legacy-reporting-svc
+      annotations:
+        # Exclude this pod from Istio sidecar injection — the ZT gateway is the proxy.
+        # Adding an Istio sidecar here would create a double-proxy with conflicting mTLS.
+        sidecar.istio.io/inject: "false"
+        # Vault Agent injection for app secrets (if needed)
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "legacy-reporting"
+    spec:
+      serviceAccountName: legacy-reporting-svc
+      # SPIRE agent socket volume — needed by the ZT gateway to fetch its SVID
+      volumes:
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/sockets
+            type: Directory
+        - name: envoy-config
+          configMap:
+            name: zt-gateway-topology-a-config
+        - name: tmp
+          emptyDir: {}
+
+      containers:
+        # ── ZT Gateway container ──────────────────────────────────────────────
+        - name: zt-gateway
+          image: envoyproxy/envoy:v1.29-latest
+          args:
+            - "-c"
+            - "/etc/envoy/envoy-config.yaml"
+            - "--log-level"
+            - "info"
+          ports:
+            - name: https
+              containerPort: 8443
+          volumeMounts:
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
+            - name: envoy-config
+              mountPath: /etc/envoy
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+
+        # ── Legacy app container ──────────────────────────────────────────────
+        - name: legacy-reporting-app
+          image: chakra-registry/legacy-reporting:2.4.1
+          # Legacy app must bind only to 127.0.0.1.
+          # If the app cannot be configured this way, use a network namespace
+          # restriction via an initContainer that removes the eth0 default route.
+          env:
+            - name: SERVER_BIND_ADDRESS
+              value: "127.0.0.1"
+            - name: SERVER_PORT
+              value: "8080"
+          ports:
+            - name: app
+              containerPort: 8080
+              # Note: hostPort is NOT set — the app is only reachable on loopback.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+---
+# NetworkPolicy: the legacy pod accepts ingress ONLY from the ZT gateway pod namespace.
+# Since gateway and app are in the same pod, this policy governs the Service's external access.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: legacy-reporting-allow
+  namespace: legacy
+spec:
+  podSelector:
+    matchLabels:
+      app: legacy-reporting-svc
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: zt-gateway
+      ports:
+        - port: 8443
+---
+# Service: exposes the ZT gateway port, not the app port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: legacy-reporting-svc
+  namespace: legacy
+spec:
+  selector:
+    app: legacy-reporting-svc
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+  type: ClusterIP

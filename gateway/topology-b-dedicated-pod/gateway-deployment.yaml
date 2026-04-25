@@ -1,0 +1,162 @@
+---
+# Topology B — Dedicated ZT gateway pod serving multiple legacy service pods
+# One gateway deployment, horizontally scalable, serves N backend services.
+# Services behind the gateway are not reachable except via the gateway.
+# The gateway uses xDS (from Istiod or a static xDS server) for dynamic routing.
+#
+# Traffic flow:
+# [mTLS caller] → zt-gateway-pod:8443 → SVID verify → OPA OBO → route by SNI/path → [svc-a:8080]
+#                                                                                   → [svc-b:8080]
+#                                                                                   → [svc-c:8080]
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zt-gateway
+  namespace: zt-gateway
+  labels:
+    app: zt-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: zt-gateway
+  template:
+    metadata:
+      labels:
+        app: zt-gateway
+      annotations:
+        # The gateway pod itself IS part of the mesh (it has an Istio sidecar for observability)
+        # but the sidecar is in PERMISSIVE mode for the inbound port — the gateway's Envoy
+        # handles mTLS termination, not the Istio sidecar.
+        traffic.sidecar.istio.io/excludeInboundPorts: "8443"
+    spec:
+      serviceAccountName: zt-gateway
+      volumes:
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/sockets
+            type: Directory
+        - name: envoy-bootstrap
+          configMap:
+            name: zt-gateway-bootstrap
+        - name: tmp
+          emptyDir: {}
+      containers:
+        - name: zt-gateway
+          image: envoyproxy/envoy:v1.29-latest
+          args:
+            - "-c"
+            - "/etc/envoy/bootstrap.yaml"
+            - "--log-level"
+            - "info"
+            - "--drain-time-s"
+            - "30"
+          ports:
+            - name: https
+              containerPort: 8443
+            - name: admin
+              containerPort: 9901
+          volumeMounts:
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
+            - name: envoy-bootstrap
+              mountPath: /etc/envoy
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /server_info
+              port: admin
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zt-gateway
+  namespace: zt-gateway
+spec:
+  selector:
+    app: zt-gateway
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+  type: ClusterIP
+---
+# HPA: scale out under load. Each gateway replica is stateless.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: zt-gateway
+  namespace: zt-gateway
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: zt-gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zt-gateway
+  namespace: zt-gateway
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: zt-gateway
+---
+# NetworkPolicy: gateway can reach all legacy service pods in the legacy namespace.
+# Legacy service pods accept ingress ONLY from the gateway namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zt-gateway-egress-to-legacy
+  namespace: zt-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: zt-gateway
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: legacy
+      ports:
+        - port: 8080
+    - ports:
+        - protocol: UDP
+          port: 53

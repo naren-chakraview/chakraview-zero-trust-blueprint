@@ -1,0 +1,110 @@
+---
+# OPA ext_authz configuration for the ZT gateway.
+# The OPA DaemonSet runs on every node; the gateway calls localhost:9191.
+# This config shows the OPA deployment + the gRPC ext_authz server config.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: opa-envoy
+  namespace: opa-system
+  labels:
+    app: opa-envoy
+spec:
+  selector:
+    matchLabels:
+      app: opa-envoy
+  template:
+    metadata:
+      labels:
+        app: opa-envoy
+    spec:
+      serviceAccountName: opa-envoy
+      volumes:
+        - name: opa-config
+          configMap:
+            name: opa-envoy-config
+        - name: opa-policies
+          configMap:
+            name: opa-policies-bundle
+        - name: spire-bundle
+          configMap:
+            name: spire-bundle  # populated by SPIRE's k8sbundle notifier
+        - name: opa-decision-log
+          emptyDir: {}
+      containers:
+        - name: opa
+          image: openpolicyagent/opa:0.63.0-envoy
+          args:
+            - "run"
+            - "--server"
+            - "--addr=localhost:8181"
+            - "--diagnostic-addr=0.0.0.0:8282"
+            - "--config-file=/config/opa-config.yaml"
+            - "/policies"
+          ports:
+            - name: grpc
+              containerPort: 9191
+            - name: http
+              containerPort: 8181
+            - name: health
+              containerPort: 8282
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: opa-config
+              mountPath: /config
+              readOnly: true
+            - name: opa-policies
+              mountPath: /policies
+              readOnly: true
+            - name: spire-bundle
+              mountPath: /spire-bundle
+              readOnly: true
+            - name: opa-decision-log
+              mountPath: /var/log/opa
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opa-envoy-config
+  namespace: opa-system
+data:
+  opa-config.yaml: |
+    plugins:
+      envoy_ext_authz_grpc:
+        addr: ":9191"
+        path: chakra/authz/allow
+        dry-run: false
+
+    decision_logs:
+      plugin: file
+
+    plugins:
+      file:
+        path: /var/log/opa/decisions.json
+
+    bundles:
+      spire_jwks:
+        resource: /spire-bundle/bundle.crt
+        polling:
+          min_delay_seconds: 60
+          max_delay_seconds: 120
+
+    labels:
+      cluster: chakra-prod
+      component: zt-gateway

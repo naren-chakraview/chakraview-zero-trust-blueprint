@@ -1,0 +1,60 @@
+---
+# ghostunnel — lightweight alternative to Envoy for Topology A
+# Use when:
+#   - Same-pod topology only (no Topology B requirement)
+#   - No protocol translation needed
+#   - OBO chain validation is handled by Istio AuthorizationPolicy (not ext_authz)
+#   - Minimal container footprint is a priority (15MB vs ~50MB Envoy)
+#
+# Limitation vs Envoy: ghostunnel cannot call OPA ext_authz.
+# This means OBO chain validation does NOT happen at the gateway level.
+# Istio AuthorizationPolicy provides SPIFFE principal enforcement,
+# but per-request OBO token chain depth and audience validation is absent.
+# Only choose ghostunnel if OBO chain validation at the proxy level is not required.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ghostunnel-topology-a-config
+  namespace: legacy
+data:
+  README.md: |
+    ghostunnel replaces the Envoy container in the topology-a pod spec.
+    Replace the zt-gateway container spec with:
+
+    containers:
+      - name: zt-gateway
+        image: ghostunnel/ghostunnel:v1.7.1
+        command:
+          - ghostunnel
+          - server
+          - --listen=0.0.0.0:8443
+          - --target=127.0.0.1:8080
+          # SPIRE integration: ghostunnel reads SVID from the SPIRE agent socket
+          - --spiffe-domain=chakra.internal
+          # Allow-list: only these SPIFFE IDs can connect
+          - --allow-uri-san=spiffe://chakra.internal/ns/orders/sa/orders-svc
+          - --allow-uri-san=spiffe://chakra.internal/ns/api-gateway/sa/api-gateway
+          # Status endpoint for health checks
+          - --status=127.0.0.1:6060
+        env:
+          - name: SPIFFE_ENDPOINT_SOCKET
+            value: unix:///run/spire/sockets/agent.sock
+        volumeMounts:
+          - name: spire-agent-socket
+            mountPath: /run/spire/sockets
+            readOnly: true
+        resources:
+          requests:
+            cpu: 10m
+            memory: 20Mi
+          limits:
+            cpu: 100m
+            memory: 32Mi
+
+    Differences from Envoy:
+    - No ext_authz → OBO chain validation absent
+    - No protocol translation
+    - No OTEL trace emission (no spans)
+    - Much smaller footprint
+    - ghostunnel uses go-spiffe natively — SVID rotation is transparent

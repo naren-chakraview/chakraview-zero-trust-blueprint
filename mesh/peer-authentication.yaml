@@ -1,0 +1,26 @@
+---
+# Cluster-wide STRICT mTLS — applied in istio-system namespace so it covers
+# ALL namespaces. A namespace-scoped STRICT policy leaves gaps when new
+# namespaces are created without an explicit policy.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  mtls:
+    mode: STRICT
+---
+# Allow plaintext health-check probes from the kubelet (which cannot do mTLS).
+# Scoped to the health-check port only; all other ports remain STRICT.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: kubelet-probe-exception
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels: {}    # applies to all workloads
+  portLevelMtls:
+    8080:
+      mode: PERMISSIVE  # health check port — kubelet probes are plaintext

@@ -1,0 +1,42 @@
+# SLO: mTLS Coverage
+# Target: 100% of pod-to-pod traffic is mTLS.
+# Any non-mTLS traffic is an SLO breach and a security incident.
+# The metric comes from Istio's Prometheus metrics via the OTEL Collector.
+
+name: mtls-coverage
+description: All pod-to-pod traffic must use mutual TLS
+owner_team: platform-security
+
+slo:
+  target_percent: 100.0
+  # Any value below 99.99% triggers the alert — even one plaintext request is a signal.
+  alert_threshold_percent: 99.99
+  window: 1h
+
+prometheus_query:
+  # mTLS coverage = mTLS requests / total requests (excluding health checks on port 8080)
+  numerator: >
+    sum(rate(istio_requests_total{
+      connection_security_policy="mutual_tls",
+      destination_service!~".*:8080"
+    }[5m]))
+  denominator: >
+    sum(rate(istio_requests_total{
+      destination_service!~".*:8080"
+    }[5m]))
+
+alert:
+  name: PlaintextTrafficDetected
+  severity: critical
+  # Fires immediately on any plaintext traffic — no burn-rate window.
+  # Every non-mTLS connection is a policy violation.
+  expr: >
+    (
+      sum(rate(istio_requests_total{connection_security_policy!="mutual_tls",destination_service!~".*:8080"}[5m]))
+      /
+      sum(rate(istio_requests_total{destination_service!~".*:8080"}[5m]))
+    ) > 0.0001
+  for: 1m
+  annotations:
+    summary: "Non-mTLS traffic detected in the cluster"
+    runbook: "https://wiki.chakra.internal/runbooks/plaintext-traffic-detected"

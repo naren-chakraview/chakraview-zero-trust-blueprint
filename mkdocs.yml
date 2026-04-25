@@ -1,0 +1,111 @@
+site_name: Chakra Commerce — Zero-Trust Blueprint
+site_description: >
+  Production-grade zero-trust reference implementation: SPIFFE/SPIRE identity,
+  Istio mTLS, OPA/Gatekeeper policy, ZT onboarding gateway for legacy apps, OpenTelemetry observability.
+site_url: https://naren-chakraview.github.io/chakraview-zero-trust-blueprint/
+repo_name: naren-chakraview/chakraview-zero-trust-blueprint
+repo_url: https://github.com/naren-chakraview/chakraview-zero-trust-blueprint
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep-purple
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep-purple
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.annotate
+    - content.code.copy
+    - content.tabs.link
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      title: On this page
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search:
+      lang: en
+  - tags
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/naren-chakraview
+  generator: false
+
+nav:
+  - Home: index.md
+  - Identity:
+      - identity/index.md
+  - Mesh:
+      - mesh/index.md
+  - Policy:
+      - policy/index.md
+  - Secrets:
+      - secrets/index.md
+  - ZT Gateway:
+      - gateway/index.md
+  - Observability:
+      - observability/index.md
+  - ADRs:
+      - adrs/README.md
+      - ADR-0001 Zero-Trust Model: adrs/ADR-0001-zero-trust-model.md
+      - ADR-0002 SPIFFE/SPIRE: adrs/ADR-0002-spiffe-spire.md
+      - ADR-0003 Istio Mesh: adrs/ADR-0003-istio-service-mesh.md
+      - ADR-0004 OPA Policy: adrs/ADR-0004-opa-policy.md
+      - ADR-0005 Secrets Management: adrs/ADR-0005-secrets-management.md
+      - ADR-0006 ZT Gateway Proxy: adrs/ADR-0006-zt-gateway-proxy.md
+      - ADR-0007 OBO Token Model: adrs/ADR-0007-obo-token-model.md
+      - ADR-0008 Observability: adrs/ADR-0008-observability.md

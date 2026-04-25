@@ -1,0 +1,227 @@
+---
+# OTEL Collector — deployed as a DaemonSet (one per node) for low-latency
+# trace collection from Envoy sidecars and ZT gateway containers on the same node.
+# A central aggregator Deployment collects from all DaemonSet instances.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: observability
+data:
+  collector.yaml: |
+    receivers:
+      # Traces and metrics from Envoy (ZT gateway + Istio sidecars) and instrumented services
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+      # SPIRE agent and server Prometheus metrics
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: spire-agent
+              scrape_interval: 30s
+              static_configs:
+                - targets: ["localhost:9988"]   # hostNetwork DaemonSet
+              relabel_configs:
+                - source_labels: [__address__]
+                  target_label: instance
+            - job_name: spire-server
+              scrape_interval: 30s
+              static_configs:
+                - targets: ["spire-server.spire.svc.cluster.local:9988"]
+            - job_name: opa-envoy
+              scrape_interval: 30s
+              static_configs:
+                - targets: ["localhost:8282"]   # OPA diagnostic port (DaemonSet, same node)
+
+      # OPA decision logs — tailed from the shared emptyDir volume
+      # The OPA container and the OTEL collector container are in the same DaemonSet pod.
+      filelog:
+        include:
+          - /var/log/opa/decisions.json
+        start_at: beginning
+        operators:
+          - type: json_parser
+            timestamp:
+              parse_from: attributes.timestamp
+              layout: "%Y-%m-%dT%H:%M:%S.%LZ"
+          - type: add
+            field: attributes.log_source
+            value: opa_decision_log
+
+    processors:
+      batch:
+        timeout: 1s
+        send_batch_size: 1024
+
+      # Add cluster-level resource attributes to all telemetry
+      resource:
+        attributes:
+          - key: cluster.name
+            value: chakra-prod
+            action: insert
+          - key: environment
+            value: production
+            action: insert
+
+      # OBO chain enrichment — promotes OBO headers to first-class span attributes.
+      # This runs on every span so the OBO chain is searchable in Tempo.
+      transform/obo-enrichment:
+        trace_statements:
+          - context: span
+            statements:
+              # Extract OBO caller chain from HTTP request header attribute
+              - >-
+                set(attributes["obo.caller_principal"],
+                  attributes["http.request.header.x-spiffe-caller-chain"])
+                if IsPresent(attributes["http.request.header.x-spiffe-caller-chain"])
+              # Extract originating user principal
+              - >-
+                set(attributes["obo.user_principal"],
+                  attributes["http.request.header.x-spiffe-user-principal"])
+                if IsPresent(attributes["http.request.header.x-spiffe-user-principal"])
+              # Extract OBO token TTL hint from header (set by services on outbound)
+              - >-
+                set(attributes["obo.token_ttl_hint"],
+                  attributes["http.request.header.x-spiffe-obo-ttl"])
+                if IsPresent(attributes["http.request.header.x-spiffe-obo-ttl"])
+              # Tag ZT gateway spans explicitly
+              - >-
+                set(attributes["zt.topology"],
+                  attributes["http.request.header.x-zt-topology"])
+                if IsPresent(attributes["http.request.header.x-zt-topology"])
+
+      # Correlate OPA decision log records with traces by trace_id
+      transform/opa-log-enrichment:
+        log_statements:
+          - context: log
+            statements:
+              - >-
+                set(attributes["trace.id"],
+                  attributes["trace_id"])
+                if IsPresent(attributes["trace_id"])
+              - >-
+                set(attributes["obo.chain"],
+                  attributes["obo_chain"])
+                if IsPresent(attributes["obo_chain"])
+
+      # Memory limiter — prevent OOM on trace spikes
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 256
+        spike_limit_mib: 64
+
+    exporters:
+      # Traces → Grafana Tempo
+      otlp/tempo:
+        endpoint: tempo.observability.svc.cluster.local:4317
+        tls:
+          insecure: false
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+
+      # Metrics → Grafana Mimir (Prometheus remote write)
+      prometheusremotewrite:
+        endpoint: http://mimir.observability.svc.cluster.local:9009/api/v1/push
+        resource_to_telemetry_conversion:
+          enabled: true
+
+      # Logs (OPA decision logs) → Grafana Loki
+      loki:
+        endpoint: http://loki.observability.svc.cluster.local:3100/loki/api/v1/push
+        labels:
+          resource:
+            - service.name
+            - cluster.name
+            - log_source
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, transform/obo-enrichment, batch]
+          exporters: [otlp/tempo]
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, resource, batch]
+          exporters: [prometheusremotewrite]
+        logs:
+          receivers: [filelog]
+          processors: [memory_limiter, resource, transform/opa-log-enrichment, batch]
+          exporters: [loki]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app: otel-collector
+spec:
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      serviceAccountName: otel-collector
+      hostNetwork: false
+      volumes:
+        - name: otel-config
+          configMap:
+            name: otel-collector-config
+        - name: opa-decision-log
+          # Shared with OPA DaemonSet pod — both pods run on the same node.
+          # In production, use a hostPath shared between OPA and OTEL DaemonSet pods.
+          hostPath:
+            path: /var/log/opa
+            type: DirectoryOrCreate
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.96.0
+          args: ["--config", "/etc/otel/collector.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+          volumeMounts:
+            - name: otel-config
+              mountPath: /etc/otel
+              readOnly: true
+            - name: opa-decision-log
+              mountPath: /var/log/opa
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: observability
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+  type: ClusterIP

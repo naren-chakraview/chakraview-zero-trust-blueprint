@@ -1,0 +1,122 @@
+---
+# Envoy bootstrap config for Topology B — xDS-driven dedicated gateway
+# Routes are programmed dynamically; adding a new upstream service
+# requires only an xDS route entry update, not a gateway restart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zt-gateway-bootstrap
+  namespace: zt-gateway
+data:
+  bootstrap.yaml: |
+    node:
+      cluster: zt-gateway
+      id: zt-gateway~${POD_IP}
+
+    static_resources:
+      clusters:
+        # SPIRE agent SDS
+        - name: spire_agent
+          connect_timeout: 1s
+          type: STATIC
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: spire_agent
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        pipe:
+                          path: /run/spire/sockets/agent.sock
+
+        # OPA DaemonSet on local node
+        - name: opa_authz
+          connect_timeout: 0.250s
+          type: STATIC
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: opa_authz
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 127.0.0.1
+                          port_value: 9191
+
+        # OTEL Collector
+        - name: otel_collector
+          connect_timeout: 1s
+          type: STRICT_DNS
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: otel_collector
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: otel-collector.observability.svc.cluster.local
+                          port_value: 4317
+
+    # xDS from Istiod — routes and upstream clusters are programmed dynamically
+    dynamic_resources:
+      ads_config:
+        api_type: GRPC
+        transport_api_version: V3
+        grpc_services:
+          - envoy_grpc:
+              cluster_name: xds_cluster
+      lds_config:
+        resource_api_version: V3
+        ads: {}
+      cds_config:
+        resource_api_version: V3
+        ads: {}
+
+    # Tracing: OTEL exporter — applied to all listeners managed by xDS
+    tracing:
+      http:
+        name: envoy.tracers.opentelemetry
+        typed_config:
+          "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+          grpc_service:
+            envoy_grpc:
+              cluster_name: otel_collector
+          service_name: zt-gateway-topology-b
+
+    admin:
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
+
+    # xDS control plane cluster (Istiod)
+    # Added to static_resources so it is available before dynamic resources load
+    static_resources:
+      clusters:
+        - name: xds_cluster
+          connect_timeout: 5s
+          type: STRICT_DNS
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: xds_cluster
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: istiod.istio-system.svc.cluster.local
+                          port_value: 15010

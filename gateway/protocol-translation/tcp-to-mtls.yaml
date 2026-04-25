@@ -1,0 +1,96 @@
+---
+# Protocol translation: plain TCP (no TLS) → mTLS tunnel
+# Use case: legacy app speaks raw TCP sockets; all traffic must be mTLS in the cluster.
+# Envoy accepts the TCP connection on the inbound port, wraps it in mTLS to the upstream.
+# SVID verification happens at the downstream TLS context (inbound mTLS from the caller).
+# The upstream TCP connection is plain (the upstream is on loopback or in a private network).
+#
+# For Topology A (same-pod): upstream is 127.0.0.1:<app-port>
+# For Topology B (dedicated pod): upstream is svc.namespace.svc.cluster.local:<port>
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zt-gateway-tcp-to-mtls
+  namespace: zt-gateway
+data:
+  listener-snippet.yaml: |
+    listeners:
+      - name: inbound_tcp_mtls
+        address:
+          socket_address:
+            address: 0.0.0.0
+            port_value: 8443
+        filter_chains:
+          - transport_socket:
+              name: envoy.transport_sockets.tls
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                require_client_certificate: true
+                common_tls_context:
+                  # SPIRE SDS for inbound SVID
+                  tls_certificate_sds_secret_configs:
+                    - name: "spiffe://chakra.internal/ns/zt-gateway/sa/zt-gateway"
+                      sds_config:
+                        api_config_source:
+                          api_type: GRPC
+                          grpc_services:
+                            - envoy_grpc:
+                                cluster_name: spire_agent
+                  validation_context_sds_secret_config:
+                    name: "spiffe://chakra.internal"
+                    sds_config:
+                      api_config_source:
+                        api_type: GRPC
+                        grpc_services:
+                          - envoy_grpc:
+                              cluster_name: spire_agent
+            filters:
+              # TCP proxy — no HTTP parsing, pure byte forwarding
+              # OBO validation is per-connection (SVID principal check), not per-request
+              - name: envoy.filters.network.rbac
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.network.rbac.v3.RBAC
+                  stat_prefix: tcp_rbac
+                  rules:
+                    action: ALLOW
+                    policies:
+                      allow_known_spiffe_ids:
+                        permissions:
+                          - any: true
+                        principals:
+                          # Allow only registered callers (SPIFFE ID from the TLS peer cert)
+                          - authenticated:
+                              principal_name:
+                                safe_regex:
+                                  regex: "spiffe://chakra\\.internal/ns/(orders|api-gateway)/sa/.*"
+              - name: envoy.filters.network.tcp_proxy
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                  stat_prefix: tcp_to_legacy
+                  cluster: legacy_tcp_upstream
+                  access_log:
+                    - name: envoy.access_loggers.file
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+                        path: /dev/stdout
+                        log_format:
+                          json_format:
+                            downstream_principal: "%DOWNSTREAM_PEER_URI_SAN%"
+                            bytes_received: "%BYTES_RECEIVED%"
+                            bytes_sent: "%BYTES_SENT%"
+                            duration_ms: "%DURATION%"
+
+    clusters:
+      - name: legacy_tcp_upstream
+        connect_timeout: 5s
+        type: STATIC
+        # No TLS on the upstream (legacy app is on loopback or private LAN)
+        load_assignment:
+          cluster_name: legacy_tcp_upstream
+          endpoints:
+            - lb_endpoints:
+                - endpoint:
+                    address:
+                      socket_address:
+                        address: 127.0.0.1   # Topology A: loopback; Topology B: replace with svc FQDN
+                        port_value: 9090      # Legacy app TCP port

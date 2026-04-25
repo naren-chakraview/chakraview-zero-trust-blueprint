@@ -1,0 +1,70 @@
+# SPIFFE ID Registry — human-authored
+# Defines which workloads receive SVIDs and their allowed OBO callers.
+# Every entry here generates a SPIRE registration entry.
+# Callers not listed in allowed_callers are denied by OPA validate-obo-chain.rego
+# even if the mTLS connection is established.
+
+trust_domain: chakra.internal
+
+workloads:
+  - name: api-gateway
+    spiffe_id: spiffe://chakra.internal/ns/api-gateway/sa/api-gateway
+    namespace: api-gateway
+    service_account: api-gateway
+    max_obo_chain_depth: 1   # ingress point; does not delegate further
+    allowed_callers: []       # entry point — no OBO callers (receives from users, not services)
+
+  - name: orders-svc
+    spiffe_id: spiffe://chakra.internal/ns/orders/sa/orders-svc
+    namespace: orders
+    service_account: orders-svc
+    max_obo_chain_depth: 3
+    allowed_callers:
+      - spiffe://chakra.internal/ns/api-gateway/sa/api-gateway
+
+  - name: inventory-svc
+    spiffe_id: spiffe://chakra.internal/ns/inventory/sa/inventory-svc
+    namespace: inventory
+    service_account: inventory-svc
+    max_obo_chain_depth: 3
+    allowed_callers:
+      - spiffe://chakra.internal/ns/orders/sa/orders-svc
+      - spiffe://chakra.internal/ns/api-gateway/sa/api-gateway
+
+  - name: customers-svc
+    spiffe_id: spiffe://chakra.internal/ns/customers/sa/customers-svc
+    namespace: customers
+    service_account: customers-svc
+    max_obo_chain_depth: 3
+    allowed_callers:
+      - spiffe://chakra.internal/ns/orders/sa/orders-svc
+      - spiffe://chakra.internal/ns/api-gateway/sa/api-gateway
+
+  - name: zt-gateway
+    spiffe_id: spiffe://chakra.internal/ns/zt-gateway/sa/zt-gateway
+    namespace: zt-gateway
+    service_account: zt-gateway
+    max_obo_chain_depth: 3
+    allowed_callers:
+      - spiffe://chakra.internal/ns/orders/sa/orders-svc
+      - spiffe://chakra.internal/ns/inventory/sa/inventory-svc
+      - spiffe://chakra.internal/ns/api-gateway/sa/api-gateway
+
+  # Legacy services onboarded via ZT gateway
+  # These do NOT receive SVIDs directly — the gateway holds the SVID.
+  # They are listed here for documentation and NetworkPolicy generation.
+  - name: legacy-billing-svc
+    spiffe_id: null   # no SVID — behind the ZT gateway
+    namespace: legacy
+    service_account: legacy-billing-svc
+    onboarding_topology: topology-b-dedicated-pod
+    gateway_spiffe_id: spiffe://chakra.internal/ns/zt-gateway/sa/zt-gateway
+    note: "HTTP/1.1 service; ZT gateway performs REST→HTTP/1.1 protocol pass-through"
+
+  - name: legacy-reporting-svc
+    spiffe_id: null
+    namespace: legacy
+    service_account: legacy-reporting-svc
+    onboarding_topology: topology-a-same-pod
+    gateway_spiffe_id: spiffe://chakra.internal/ns/zt-gateway/sa/zt-gateway
+    note: "TCP service; ZT gateway performs TCP→mTLS wrapping"

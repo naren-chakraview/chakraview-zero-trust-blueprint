@@ -1,0 +1,53 @@
+---
+# Inventory service: allow ingress from orders-svc and api-gateway.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: inventory-allow
+  namespace: inventory
+spec:
+  selector:
+    matchLabels:
+      app: inventory-svc
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/orders/sa/orders-svc"
+              - "cluster.local/ns/api-gateway/sa/api-gateway"
+      to:
+        - operation:
+            methods: ["GET", "POST"]
+            paths:
+              - "/api/v1/inventory*"
+              - "/api/v1/stock/reserve"
+              - "/api/v1/stock/release"
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inventory-ingress
+  namespace: inventory
+spec:
+  podSelector:
+    matchLabels:
+      app: inventory-svc
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: orders
+          podSelector:
+            matchLabels:
+              app: orders-svc
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: api-gateway
+          podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - port: 8080

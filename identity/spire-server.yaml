@@ -1,0 +1,195 @@
+---
+# SPIRE Server — StatefulSet
+# Acts as the root/intermediate CA for both SPIFFE SVIDs and Istio mTLS certificates.
+# Stores registration entries and the CA key in a PersistentVolume.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spire-server-config
+  namespace: spire
+data:
+  server.conf: |
+    server {
+      bind_address = "0.0.0.0"
+      bind_port = "8081"
+      trust_domain = "chakra.internal"
+      data_dir = "/run/spire/data"
+      log_level = "INFO"
+      log_format = "json"
+
+      # SVID TTL — 1 hour. Short enough to limit blast radius; long enough
+      # that network latency does not cause expiry during normal operations.
+      default_x509_svid_ttl = "1h"
+      default_jwt_svid_ttl = "5m"
+
+      ca_ttl = "24h"
+      ca_key_type = "ec-p384"
+
+      # Prometheus metrics for OTEL Collector scraping
+      health_checks {
+        listener_enabled = true
+        bind_address = "0.0.0.0"
+        bind_port = "8080"
+        live_path = "/live"
+        ready_path = "/ready"
+      }
+    }
+
+    plugins {
+      DataStore "sql" {
+        plugin_data {
+          database_type = "sqlite3"
+          connection_string = "/run/spire/data/datastore.sqlite3"
+        }
+      }
+
+      NodeAttestor "k8s_psat" {
+        plugin_data {
+          clusters = {
+            "chakra-prod" = {
+              service_account_allow_list = ["spire:spire-agent"]
+              audience = ["spire-server"]
+            }
+          }
+        }
+      }
+
+      KeyManager "disk" {
+        plugin_data {
+          keys_path = "/run/spire/data/keys.json"
+        }
+      }
+
+      Notifier "k8sbundle" {
+        plugin_data {
+          namespace = "spire"
+          config_map = "spire-bundle"
+          config_map_key = "bundle.crt"
+        }
+      }
+    }
+
+    telemetry {
+      Prometheus {
+        port = 9988
+      }
+    }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: spire-server
+  namespace: spire
+  labels:
+    app: spire-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spire-server
+  serviceName: spire-server
+  template:
+    metadata:
+      labels:
+        app: spire-server
+    spec:
+      serviceAccountName: spire-server
+      shareProcessNamespace: true
+      containers:
+        - name: spire-server
+          image: ghcr.io/spiffe/spire-server:1.9.4
+          args: ["-config", "/run/spire/config/server.conf"]
+          ports:
+            - name: grpc
+              containerPort: 8081
+            - name: health
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9988
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 60
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: spire-config
+              mountPath: /run/spire/config
+              readOnly: true
+            - name: spire-data
+              mountPath: /run/spire/data
+            - name: spire-server-socket
+              mountPath: /tmp/spire-server/private
+      volumes:
+        - name: spire-config
+          configMap:
+            name: spire-server-config
+        - name: spire-server-socket
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: spire-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spire-server
+  namespace: spire
+spec:
+  selector:
+    app: spire-server
+  ports:
+    - name: grpc
+      port: 8081
+      targetPort: 8081
+    - name: metrics
+      port: 9988
+      targetPort: 9988
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-server
+  namespace: spire
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spire-server
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "patch"]
+    resourceNames: ["spire-bundle"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spire-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spire-server
+subjects:
+  - kind: ServiceAccount
+    name: spire-server
+    namespace: spire

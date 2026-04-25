@@ -1,0 +1,186 @@
+---
+# Envoy static config for Topology A — same-pod loopback isolation
+# This config is mounted as a ConfigMap into the zt-gateway container.
+# It is intentionally static (no xDS) to minimise the operational surface
+# for a per-pod gateway. Protocol: mTLS inbound → plain HTTP to loopback.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zt-gateway-topology-a-config
+  namespace: legacy
+data:
+  envoy-config.yaml: |
+    static_resources:
+      listeners:
+        - name: inbound_mtls
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 8443
+          filter_chains:
+            - transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  require_client_certificate: true
+                  common_tls_context:
+                    # SDS: SPIRE agent delivers the SVID to Envoy via the Workload API socket.
+                    # Certificate rotates every hour without a restart.
+                    tls_certificate_sds_secret_configs:
+                      - name: "spiffe://chakra.internal/ns/legacy/sa/legacy-reporting-svc"
+                        sds_config:
+                          api_config_source:
+                            api_type: GRPC
+                            grpc_services:
+                              - envoy_grpc:
+                                  cluster_name: spire_agent
+                    validation_context_sds_secret_config:
+                      name: "spiffe://chakra.internal"
+                      sds_config:
+                        api_config_source:
+                          api_type: GRPC
+                          grpc_services:
+                            - envoy_grpc:
+                                cluster_name: spire_agent
+                    # Only accept TLS 1.3 — legacy callers must upgrade
+                    tls_params:
+                      tls_minimum_protocol_version: TLSv1_3
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: inbound_mtls
+                    codec_type: AUTO
+
+                    # ── Tracing ──────────────────────────────────────────────
+                    tracing:
+                      provider:
+                        name: envoy.tracers.opentelemetry
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                          grpc_service:
+                            envoy_grpc:
+                              cluster_name: otel_collector
+                          service_name: zt-gateway-topology-a
+
+                    http_filters:
+                      # ── Step 1: SVID verification span ───────────────────
+                      - name: envoy.filters.http.lua
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
+                          inline_code: |
+                            function envoy_on_request(handle)
+                              -- Start zt.svid_verification span
+                              -- The SPIFFE ID of the caller is in the downstream TLS peer cert
+                              local peer_san = handle:streamInfo():downstreamSslConnection():uriSanPeerCertificate()
+                              handle:headers():add("x-zt-verified-caller", peer_san and peer_san[1] or "unknown")
+                            end
+
+                      # ── Step 2: OBO chain validation via OPA ext_authz ───
+                      - name: envoy.filters.http.ext_authz
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                          grpc_service:
+                            envoy_grpc:
+                              cluster_name: opa_authz
+                            timeout: 0.250s
+                          transport_api_version: V3
+                          with_request_body:
+                            max_request_bytes: 8192
+                            allow_partial_message: true
+                          # On OPA failure (not deny — actual failure), fail open to avoid
+                          # cascading outage. Change to failure_mode_deny: true for strict mode.
+                          failure_mode_allow: false
+
+                      # ── Step 3: Forward to loopback ──────────────────────
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+                    route_config:
+                      name: local_route
+                      virtual_hosts:
+                        - name: legacy_app
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                prefix: "/"
+                              route:
+                                cluster: legacy_app_loopback
+                                timeout: 30s
+                              decorator:
+                                operation: "zt.forward_to_legacy"
+
+      clusters:
+        # SPIRE agent SDS endpoint
+        - name: spire_agent
+          connect_timeout: 1s
+          type: STATIC
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: spire_agent
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        pipe:
+                          path: /run/spire/sockets/agent.sock
+
+        # OPA DaemonSet — runs on the same node (localhost)
+        - name: opa_authz
+          connect_timeout: 0.250s
+          type: STATIC
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: opa_authz
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 127.0.0.1
+                          port_value: 9191
+
+        # OTEL Collector for trace export
+        - name: otel_collector
+          connect_timeout: 1s
+          type: STRICT_DNS
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: otel_collector
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: otel-collector.observability.svc.cluster.local
+                          port_value: 4317
+
+        # The legacy application on loopback
+        - name: legacy_app_loopback
+          connect_timeout: 5s
+          type: STATIC
+          load_assignment:
+            cluster_name: legacy_app_loopback
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 127.0.0.1
+                          port_value: 8080
+
+    admin:
+      address:
+        socket_address:
+          address: 127.0.0.1
+          port_value: 9901

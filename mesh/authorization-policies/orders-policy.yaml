@@ -1,0 +1,84 @@
+---
+# Orders service: allow ingress from api-gateway only.
+# Principal is the SPIFFE ID from the caller's X.509 SVID (set by Istio from the mTLS cert).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: orders-allow
+  namespace: orders
+spec:
+  selector:
+    matchLabels:
+      app: orders-svc
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/api-gateway/sa/api-gateway"
+      to:
+        - operation:
+            methods: ["POST", "GET"]
+            paths:
+              - "/api/v1/orders*"
+              - "/api/v1/orders/*/cancel"
+---
+# Orders service: allow egress to inventory and customers.
+# NetworkPolicy for L3/L4 enforcement of the same allow-list.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orders-egress
+  namespace: orders
+spec:
+  podSelector:
+    matchLabels:
+      app: orders-svc
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: inventory
+          podSelector:
+            matchLabels:
+              app: inventory-svc
+      ports:
+        - port: 8080
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: customers
+          podSelector:
+            matchLabels:
+              app: customers-svc
+      ports:
+        - port: 8080
+    # Allow DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+---
+# Orders service: allow ingress from api-gateway at L3/L4.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orders-ingress
+  namespace: orders
+spec:
+  podSelector:
+    matchLabels:
+      app: orders-svc
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: api-gateway
+          podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - port: 8080

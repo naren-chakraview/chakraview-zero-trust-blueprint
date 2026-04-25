@@ -1,0 +1,46 @@
+---
+# Kyverno equivalent of OPA require-spiffe-id.rego
+# Validates that every Pod's service account has a registered SPIFFE ID.
+# Uses a ConfigMap as the registry lookup (in OPA, this is the data bundle).
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-spiffe-id-registration
+  annotations:
+    policies.kyverno.io/title: Require SPIFFE ID Registration
+    policies.kyverno.io/description: >
+      Every Pod must use a service account that has a registered SPIFFE ID entry
+      in the identity/spiffe-ids.yaml registry. A pod without a SPIFFE ID entry
+      will not receive an SVID and cannot participate in mTLS.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-spiffe-registration
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - spire
+                - istio-system
+                - cert-manager
+      validate:
+        message: >
+          Pod uses service account {{ request.object.spec.serviceAccountName }} in namespace
+          {{ request.object.metadata.namespace }}, but SPIFFE ID
+          spiffe://chakra.internal/ns/{{ request.object.metadata.namespace }}/sa/{{ request.object.spec.serviceAccountName }}
+          is not registered. Register the workload in identity/spiffe-ids.yaml before deploying.
+        deny:
+          conditions:
+            all:
+              - key: >
+                  spiffe://chakra.internal/ns/{{ request.object.metadata.namespace }}/sa/{{ request.object.spec.serviceAccountName }}
+                operator: AnyNotIn
+                value: "{{ lookup('configmap', 'spire', 'spiffe-id-registry', 'registered_ids') }}"

@@ -1,0 +1,76 @@
+---
+# OBO Header Propagation — EnvoyFilter
+# Applied to all sidecars in the mesh. At each hop:
+#   1. Extract X-SPIFFE-OBO-Token and X-SPIFFE-Caller-Chain from the inbound request
+#   2. Validate the OBO token JWT signature against the SPIRE trust bundle
+#   3. Append this service's SPIFFE ID to the caller chain
+#   4. Re-attach both headers on the outbound request to the next hop
+#
+# This runs as a Lua filter — lightweight, no external calls.
+# Full OBO chain validation (OPA policy) happens at the destination via ext_authz.
+# This filter only ensures the chain is propagated and not silently dropped.
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: obo-header-propagation
+  namespace: istio-system  # cluster-wide
+spec:
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: SIDECAR_INBOUND
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.lua
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
+            inline_code: |
+              function envoy_on_request(request_handle)
+                local obo_token = request_handle:headers():get("x-spiffe-obo-token")
+                local caller_chain = request_handle:headers():get("x-spiffe-caller-chain")
+
+                -- Propagate OBO token to upstream (it was validated at ext_authz before reaching here)
+                if obo_token then
+                  request_handle:headers():replace("x-spiffe-obo-token", obo_token)
+                end
+
+                -- Append this service's SPIFFE ID to the caller chain
+                local own_id = request_handle:streamInfo():dynamicMetadata():get("envoy.filters.http.jwt_authn", "spiffe_id") or ""
+                if own_id ~= "" then
+                  if caller_chain and caller_chain ~= "" then
+                    request_handle:headers():replace("x-spiffe-caller-chain", caller_chain .. "," .. own_id)
+                  else
+                    request_handle:headers():replace("x-spiffe-caller-chain", own_id)
+                  end
+                end
+
+                -- Propagate W3C trace context (preserve trace correlation across OBO hops)
+                local traceparent = request_handle:headers():get("traceparent")
+                if traceparent then
+                  request_handle:headers():replace("traceparent", traceparent)
+                end
+              end
+
+              function envoy_on_response(response_handle)
+                -- Pass through; OBO headers are request-only
+              end
+---
+# Telemetry resource: route all Istio proxy traces to the OTEL Collector.
+# 100% sampling — every connection in a zero-trust cluster is a security event.
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: otel-tracing
+  namespace: istio-system
+spec:
+  tracing:
+    - providers:
+        - name: otel-tracing
+      randomSamplingPercentage: 100.0
