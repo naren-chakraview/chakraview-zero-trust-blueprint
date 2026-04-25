@@ -43,9 +43,23 @@ graph TB
     JWT -->|"validated by"| OBO_POLICY
     PLANE1 --> PLANE2 --> PLANE3
 
-    style PLANE1 fill:#1e3a5f,color:#fff
-    style PLANE2 fill:#14532d,color:#fff
-    style PLANE3 fill:#4a044e,color:#fff
+    style PLANE1 fill:#dbeafe,color:#1e3a8a,stroke:#93c5fd
+    style PLANE2 fill:#d1fae5,color:#064e3b,stroke:#6ee7b7
+    style PLANE3 fill:#ede9fe,color:#2e1065,stroke:#c4b5fd
+
+    style SPIRE      fill:#1d4ed8,color:#ffffff,stroke:#1e40af
+    style AGENT      fill:#1d4ed8,color:#ffffff,stroke:#1e40af
+    style SVID       fill:#1d4ed8,color:#ffffff,stroke:#1e40af
+    style JWT        fill:#1d4ed8,color:#ffffff,stroke:#1e40af
+
+    style PA         fill:#059669,color:#ffffff,stroke:#047857
+    style AP         fill:#059669,color:#ffffff,stroke:#047857
+    style NP         fill:#059669,color:#ffffff,stroke:#047857
+    style OBO_FILTER fill:#059669,color:#ffffff,stroke:#047857
+
+    style GK         fill:#6d28d9,color:#ffffff,stroke:#5b21b6
+    style OPA        fill:#6d28d9,color:#ffffff,stroke:#5b21b6
+    style OBO_POLICY fill:#6d28d9,color:#ffffff,stroke:#5b21b6
 ```
 
 Each plane is independently replaceable. A failure in one plane does not bypass the others.
