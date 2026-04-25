@@ -47,19 +47,19 @@ graph TB
     style PLANE2 fill:#d1fae5,color:#064e3b,stroke:#6ee7b7
     style PLANE3 fill:#ede9fe,color:#2e1065,stroke:#c4b5fd
 
-    style SPIRE      fill:#1d4ed8,color:#ffffff,stroke:#1e40af
-    style AGENT      fill:#1d4ed8,color:#ffffff,stroke:#1e40af
-    style SVID       fill:#1d4ed8,color:#ffffff,stroke:#1e40af
-    style JWT        fill:#1d4ed8,color:#ffffff,stroke:#1e40af
+    style SPIRE      fill:#93c5fd,color:#000000,stroke:#3b82f6
+    style AGENT      fill:#93c5fd,color:#000000,stroke:#3b82f6
+    style SVID       fill:#93c5fd,color:#000000,stroke:#3b82f6
+    style JWT        fill:#93c5fd,color:#000000,stroke:#3b82f6
 
-    style PA         fill:#059669,color:#ffffff,stroke:#047857
-    style AP         fill:#059669,color:#ffffff,stroke:#047857
-    style NP         fill:#059669,color:#ffffff,stroke:#047857
-    style OBO_FILTER fill:#059669,color:#ffffff,stroke:#047857
+    style PA         fill:#6ee7b7,color:#000000,stroke:#10b981
+    style AP         fill:#6ee7b7,color:#000000,stroke:#10b981
+    style NP         fill:#6ee7b7,color:#000000,stroke:#10b981
+    style OBO_FILTER fill:#6ee7b7,color:#000000,stroke:#10b981
 
-    style GK         fill:#6d28d9,color:#ffffff,stroke:#5b21b6
-    style OPA        fill:#6d28d9,color:#ffffff,stroke:#5b21b6
-    style OBO_POLICY fill:#6d28d9,color:#ffffff,stroke:#5b21b6
+    style GK         fill:#c4b5fd,color:#000000,stroke:#8b5cf6
+    style OPA        fill:#c4b5fd,color:#000000,stroke:#8b5cf6
+    style OBO_POLICY fill:#c4b5fd,color:#000000,stroke:#8b5cf6
 ```
 
 Each plane is independently replaceable. A failure in one plane does not bypass the others.
